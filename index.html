@@ -272,7 +272,7 @@ details.more>summary{cursor:pointer;font-weight:700;color:var(--accent)}
           </div>
           <p class="small">Fica guardada apenas neste navegador. Para a apagar, limpa o campo e carrega em Guardar.</p></li>
         <li><strong>Escreve um código e carrega em Analisar</strong>
-          <p>Cada análise faz 5 pedidos à FMP. As ações dos EUA são as que funcionam melhor no plano gratuito.</p></li>
+          <p>Cada análise faz cerca de 5 pedidos à FMP. As ações dos EUA são as que funcionam melhor no plano gratuito.</p></li>
       </ol>
       <dl class="faq">
         <dt>Aparece "Invalid API KEY"</dt><dd>A chave foi mal copiada. Volta ao painel da FMP, copia de novo e guarda.</dd>
@@ -315,18 +315,27 @@ const big=x=>ok(x)?new Intl.NumberFormat('pt-PT',{notation:'compact',maximumFrac
 const COL={good:'var(--good)',mid:'var(--mid)',bad:'var(--bad)',na:'var(--na)'};
 /* ---------- Dados ---------- */
 async function fetchAll(sym,key){
-  const call=async(ep,extra='')=>{
+  const get=async(ep,extra)=>{
     const url=`https://financialmodelingprep.com/stable/${ep}?symbol=${encodeURIComponent(sym)}${extra}&apikey=${encodeURIComponent(key)}`;
-    let r;try{r=await fetch(url)}catch(e){throw new Error('Não foi possível contactar a FMP. Dentro do Claude os pedidos a sites externos são bloqueados; para dados reais, abre o ficheiro no navegador. Aqui podes testar com o exemplo.')}
-    let j=null;try{j=await r.json()}catch(e){}
-    if(!r.ok||(j&&!Array.isArray(j)&&j['Error Message'])){
-      const m=j&&j['Error Message']?j['Error Message']:`HTTP ${r.status}`;
-      throw new Error(`A FMP recusou o pedido "${ep}": ${m}`);}
-    return j;};
-  const [q,p,inc,bal,cf]=await Promise.all([call('quote'),call('profile'),
-    call('income-statement','&period=annual&limit=7'),call('balance-sheet-statement','&period=annual&limit=2'),
-    call('cash-flow-statement','&period=annual&limit=7')]);
+    let r;try{r=await fetch(url)}catch(e){throw new Error('Não foi possível contactar a FMP. Dentro do Claude os pedidos a sites externos são bloqueados; fora dele, verifica a internet.')}
+    const txt=await r.text();let j=null;try{j=JSON.parse(txt)}catch(e){}
+    const msg=(j&&!Array.isArray(j)&&(j['Error Message']||j.message))||(!j&&txt?txt.slice(0,160):'');
+    return{ok:r.ok&&!(j&&!Array.isArray(j)&&j['Error Message']),status:r.status,j,msg};};
+  // tenta limites cada vez menores: o plano gratuito recusa limites altos (HTTP 402)
+  const call=async(ep,limits=[null])=>{
+    let last;
+    for(const lim of limits){
+      last=await get(ep,lim===null?'':`&period=annual${lim?'&limit='+lim:''}`);
+      if(last.ok)return last.j;
+      if(last.status!==402)break;}
+    if(last.status===402)throw new Error(`O plano gratuito da FMP não dá acesso a "${ep}" para ${sym}${last.msg?' ('+last.msg+')':''}. Isto costuma acontecer com ações fora dos EUA ou menos conhecidas; experimenta uma grande empresa americana, como AAPL.`);
+    if(last.status===401||/invalid api key/i.test(last.msg))throw new Error('A chave da API não é válida. Copia-a de novo no painel da FMP e guarda.');
+    if(last.status===429)throw new Error('Atingiste o limite diário de pedidos do plano gratuito. Tenta amanhã.');
+    throw new Error(`A FMP recusou o pedido "${ep}": ${last.msg||'HTTP '+last.status}`);};
+  const q=await call('quote');
   if(!q||!q.length)throw new Error(`Ação não encontrada: "${sym}". Confirma o código na bolsa.`);
+  const [p,inc,bal,cf]=await Promise.all([call('profile'),
+    call('income-statement',[5,3,0]),call('balance-sheet-statement',[2,1,0]),call('cash-flow-statement',[5,3,0])]);
   return {q:q[0],p:(p&&p[0])||{},inc:inc||[],bal:bal||[],cf:cf||[]};
 }
 
