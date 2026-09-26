@@ -251,6 +251,7 @@ details.more>summary{cursor:pointer;font-weight:700;color:var(--accent)}
       <button data-t="AAPL">AAPL</button><button data-t="MSFT">MSFT</button><button data-t="KO">KO</button><button data-t="NVDA">NVDA</button>
     </div>
     <button class="demo" id="demo">Ver um relatório de exemplo (dados fictícios)</button>
+    <p class="small" id="usage"></p>
   </div>
   <div id="status" role="status" aria-live="polite"></div>
 
@@ -272,7 +273,7 @@ details.more>summary{cursor:pointer;font-weight:700;color:var(--accent)}
           </div>
           <p class="small">Fica guardada apenas neste navegador. Para a apagar, limpa o campo e carrega em Guardar.</p></li>
         <li><strong>Escreve um código e carrega em Analisar</strong>
-          <p>Cada análise faz cerca de 5 pedidos à FMP. As ações dos EUA são as que funcionam melhor no plano gratuito.</p></li>
+          <p>O plano gratuito dá 250 pedidos por dia. Cada análise nova gasta 5, e repetir a mesma ação no mesmo dia não gasta nada. As ações dos EUA são as que têm dados mais completos.</p></li>
       </ol>
       <dl class="faq">
         <dt>Aparece "Invalid API KEY"</dt><dd>A chave foi mal copiada. Volta ao painel da FMP, copia de novo e guarda.</dd>
@@ -313,11 +314,17 @@ const pct=(x,d=1)=>ok(x)?(x*100).toFixed(d).replace('.',',')+'%':'—';
 const num=(x,d=1)=>ok(x)?x.toFixed(d).replace('.',','):'—';
 const big=x=>ok(x)?new Intl.NumberFormat('pt-PT',{notation:'compact',maximumFractionDigits:1}).format(x):'—';
 const COL={good:'var(--good)',mid:'var(--mid)',bad:'var(--bad)',na:'var(--na)'};
+/* ---------- Pedidos à FMP (plano gratuito: 250 por dia) ---------- */
+const DAILY=250;
+function usage(){const d=new Date().toISOString().slice(0,10),u=LS.get('a4c:use',{d,n:0});return u.d===d?u:{d,n:0}}
+function showUsage(){const u=usage(),el=document.getElementById('usage');if(el)el.textContent=`Pedidos à FMP hoje: ${u.n} de ${DAILY} (plano gratuito). Voltam a zero à meia-noite.`}
+function fmp(url){const u=usage();u.n++;LS.set('a4c:use',u);showUsage();return fetch(url)}
+
 /* ---------- Dados ---------- */
 async function fetchAll(sym,key){
   const get=async(ep,extra)=>{
     const url=`https://financialmodelingprep.com/stable/${ep}?symbol=${encodeURIComponent(sym)}${extra}&apikey=${encodeURIComponent(key)}`;
-    let r;try{r=await fetch(url)}catch(e){throw new Error('Não foi possível contactar a FMP. Dentro do Claude os pedidos a sites externos são bloqueados; fora dele, verifica a internet.')}
+    let r;try{r=await fmp(url)}catch(e){throw new Error('Não foi possível contactar a FMP. Dentro do Claude os pedidos a sites externos são bloqueados; fora dele, verifica a internet.')}
     const txt=await r.text();let j=null;try{j=JSON.parse(txt)}catch(e){}
     const msg=(j&&!Array.isArray(j)&&(j['Error Message']||j.message))||(!j&&txt?txt.slice(0,160):'');
     return{ok:r.ok&&!(j&&!Array.isArray(j)&&j['Error Message']),status:r.status,j,msg};};
@@ -332,11 +339,19 @@ async function fetchAll(sym,key){
     if(last.status===401||/invalid api key/i.test(last.msg))throw new Error('A chave da API não é válida. Copia-a de novo no painel da FMP e guarda.');
     if(last.status===429)throw new Error('Atingiste o limite diário de pedidos do plano gratuito. Tenta amanhã.');
     throw new Error(`A FMP recusou o pedido "${ep}": ${last.msg||'HTTP '+last.status}`);};
+  const cache=LS.get('a4c:data',{}),hit=cache[sym];
+  if(hit&&Date.now()-hit.t<12*3600e3)return {...hit.d,cached:true};
   const q=await call('quote');
   if(!q||!q.length)throw new Error(`Ação não encontrada: "${sym}". Confirma o código na bolsa.`);
-  const [p,inc,bal,cf]=await Promise.all([call('profile'),
-    call('income-statement',[5,3,0]),call('balance-sheet-statement',[2,1,0]),call('cash-flow-statement',[5,3,0])]);
-  return {q:q[0],p:(p&&p[0])||{},inc:inc||[],bal:bal||[],cf:cf||[]};
+  let limited=false;
+  const soft=pr=>pr.catch(e=>{if(/plano gratuito/.test(e.message)){limited=true;return []}throw e});
+  const [p,inc,bal,cf]=await Promise.all([soft(call('profile')),
+    soft(call('income-statement',[5,3,0])),soft(call('balance-sheet-statement',[2,1,0])),soft(call('cash-flow-statement',[5,3,0]))]);
+  const d={q:q[0],p:(p&&p[0])||{},inc:inc||[],bal:bal||[],cf:cf||[],limited};
+  cache[sym]={t:Date.now(),d};
+  Object.keys(cache).sort((a,b)=>cache[b].t-cache[a].t).slice(25).forEach(k=>delete cache[k]);
+  LS.set('a4c:data',cache);
+  return d;
 }
 
 function demoData(){
@@ -386,7 +401,7 @@ function analyze(d){
 
   if(rcur&&cur&&rcur!==cur)notes.push(`As contas estão em ${rcur} e a cotação em ${cur}; P/FCF, P/Vendas e rendimento FCF podem estar distorcidos.`);
   if(/financial|real estate/i.test(p.sector||''))notes.push(`Setor ${p.sector}: margens, dívida e FCF não se leem da mesma forma aqui. Usa as notas com cautela.`);
-  if(n<3)notes.push('Histórico curto (menos de 4 anos de contas); as taxas de crescimento são pouco fiáveis.');
+  if(n>=0&&n<3)notes.push('Histórico curto (menos de 4 anos de contas); as taxas de crescimento são pouco fiáveis.');
 
   const Q=[
     {l:`Crescimento das receitas (${n} anos, ao ano)`,v:pct(revC),s:grade(revC,x=>x>=.08,x=>x>=0),h:'Bom a partir de 8% ao ano'},
@@ -423,7 +438,10 @@ function analyze(d){
   if(ok(vs200)&&vs200<0&&ok(ma50)&&ok(ma200)&&ma50<ma200)add('médio','Tendência de preço descendente (abaixo da média de 200 dias).');
   if(ok(p.beta)&&p.beta>1.6)add('médio',`Beta de ${num(p.beta,2)}: oscila bastante mais do que o mercado.`);
   if(ok(pe)&&pe>40)add('médio',`P/L de ${num(pe)}: o preço já desconta muito crescimento.`);
-  const riskScore=Math.max(0,100-R.reduce((a,r)=>a+(r.sev==='alto'?25:12),0));
+  const noFin=!inc.length;
+  if(d.limited)notes.unshift(noFin?'O plano gratuito da FMP não inclui as contas desta empresa (comum em empresas fora dos EUA). Só a camada de mercado foi calculada; a nota global fica em branco para não enganar.':'Parte dos dados desta empresa não está no plano gratuito; algumas métricas ficaram sem valor.');
+  if(d.cached)notes.push('Dados guardados há menos de 12 horas, para poupar pedidos à FMP.');
+  const riskScore=noFin?null:Math.max(0,100-R.reduce((a,r)=>a+(r.sev==='alto'?25:12),0));
 
   const layers=[
     {t:'Qualidade da empresa',q:'O lucro é sustentável?',ms:Q,sc:layerScore(Q),
@@ -434,7 +452,7 @@ function analyze(d){
     {t:'Sinais de mercado',q:'A tendência apoia a tese?',ms:M,sc:layerScore(M),
      inv:[ok(ma200)?`Preço abaixo da média de 200 dias (${num(ma200,2)}).`:null,ok(q.yearLow)?`Novo mínimo de 52 semanas, abaixo de ${num(q.yearLow,2)}.`:null]}];
   const w=[[layers[0].sc,.3],[layers[1].sc,.25],[layers[2].sc,.15],[riskScore,.3]].filter(x=>x[0]!=null);
-  const tw=w.reduce((a,x)=>a+x[1],0),overall=tw?Math.round(w.reduce((a,x)=>a+x[0]*x[1],0)/tw):null;
+  const tw=w.reduce((a,x)=>a+x[1],0),overall=(tw&&!noFin)?Math.round(w.reduce((a,x)=>a+x[0]*x[1],0)/tw):null;
   return {sym:q.symbol,name:p.companyName||q.name||q.symbol,sector:p.sector,industry:p.industry,cur,price,
     chg:q.changePercentage,mcap,demo:!!d.demo,date:new Date().toLocaleDateString('pt-PT'),
     layers,risks:R,riskScore,overall,notes};
@@ -447,7 +465,7 @@ const WHAT=[
  'Compara o preço com os lucros, o fluxo de caixa e as vendas. Números mais baixos significam ação mais barata.',
  'Olha para o comportamento recente do preço: se está em tendência de subida ou de descida.'];
 function verdict(s){
-  if(s==null)return['Dados insuficientes','A FMP devolveu poucos dados para esta ação.'];
+  if(s==null)return['Dados insuficientes','Sem as contas da empresa não é possível dar uma nota global. Vê a camada de mercado abaixo.'];
   if(s>=70)return['Perfil sólido','Vale estudo aprofundado. Confirma os pontos de risco antes de decidir.'];
   if(s>=50)return['Perfil misto','Há pontos fortes, mas também dúvidas concretas a esclarecer.'];
   return['Perfil frágil','Os contra-exemplos pesam mais do que os argumentos a favor.'];
@@ -480,7 +498,7 @@ function render(r){
   ${r.layers.map(layer).join('')}
   <details class="card layer" open style="margin-top:14px">${head(4,'Riscos e contra-exemplos','O que pode fazer a tese falhar?',r.riskScore)}<div class="body">
     <p class="what">Alertas automáticos tirados das contas e do preço. Cada um é uma razão concreta para verificar antes de decidir.</p>
-    ${r.risks.length?`<ul class="flags">${r.risks.map(x=>`<li><span class="sev" style="background:${sevCol[x.sev]}">${x.sev}</span><span>${esc(x.t)}</span></li>`).join('')}</ul>`
+    ${r.riskScore==null?`<div class="inv"><strong>Sem contas, sem alertas</strong><ul><li>Os alertas de risco precisam das contas da empresa, que não estão disponíveis no plano gratuito.</li></ul></div>`:r.risks.length?`<ul class="flags">${r.risks.map(x=>`<li><span class="sev" style="background:${sevCol[x.sev]}">${x.sev}</span><span>${esc(x.t)}</span></li>`).join('')}</ul>`
       :`<div class="inv"><strong>Nenhum alerta disparou</strong><ul><li>Isto não exclui riscos de negócio, concorrência ou regulação, que estes dados não mostram.</li></ul></div>`}
   </div></details></div>`;
   $('#report').scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});
@@ -597,7 +615,34 @@ VZ|Verizon|tel|g|2;T|AT&T|tel|g|2;TMUS|T-Mobile US|tel|g|1;
 DIS|Walt Disney|media|g|1;NFLX|Netflix|media|g|0;ROKU|Roku|media|m|0;WBD|Warner Bros. Discovery|media|g|0;
 O|Realty Income|reit|g|2;PLD|Prologis|reit|g|1;AMT|American Tower|reit|g|2;SPG|Simon Property|reit|g|2;EQIX|Equinix|reit|g|1;
 FCX|Freeport-McMoRan|mine|g|1;NEM|Newmont|mine|g|1;
-LIN|Linde|chem|g|1;SHW|Sherwin-Williams|chem|g|1;DOW|Dow|chem|g|1`
+LIN|Linde|chem|g|1;SHW|Sherwin-Williams|chem|g|1;DOW|Dow|chem|g|1;INTU|Intuit|soft|g|1;ADSK|Autodesk|soft|g|0;WDAY|Workday|soft|g|0;SNOW|Snowflake|soft|g|0;PANW|Palo Alto Networks|soft|g|0;CRWD|CrowdStrike|soft|g|0;ACN|Accenture|soft|g|1;SHOP|Shopify|soft|g|0;
+AMAT|Applied Materials|chip|g|1;LRCX|Lam Research|chip|g|1;ADI|Analog Devices|chip|g|1;MCHP|Microchip Technology|chip|g|1;TSM|TSMC (Taiwan)|chip|g|1;ASML|ASML (Países Baixos)|chip|g|1;
+SONY|Sony (Japão)|hw|g|1;UBER|Uber|net|g|0;
+NVO|Novo Nordisk (Dinamarca)|drug|g|1;AZN|AstraZeneca (Reino Unido)|drug|g|1;GSK|GSK (Reino Unido)|drug|g|2;SNY|Sanofi (França)|drug|g|2;NVS|Novartis (Suíça)|drug|g|2;ZTS|Zoetis (animais)|drug|g|1;
+BIIB|Biogen|bio|g|0;DHR|Danaher|med|g|1;EW|Edwards Lifesciences|med|g|0;BDX|Becton Dickinson|med|g|1;HUM|Humana|hins|g|1;ELV|Elevance Health|hins|g|1;
+BP|BP (Reino Unido)|oil|g|2;SHEL|Shell (Reino Unido)|oil|g|2;TTE|TotalEnergies (França)|oil|g|2;KMI|Kinder Morgan (gasodutos)|oil|g|2;WMB|Williams (gasodutos)|oil|g|2;ET|Energy Transfer (gasodutos)|oil|g|2;MPC|Marathon Petroleum|oil|g|1;DVN|Devon Energy|oil|g|2;
+BEP|Brookfield Renewable|ren|g|2;RUN|Sunrun (solar)|ren|p|0;
+EXC|Exelon|util|g|2;XEL|Xcel Energy|util|g|2;SRE|Sempra|util|g|2;ED|Con Edison|util|g|2;PCG|PG&E|util|g|1;BTU|Peabody (carvão)|coal|m|1;
+USB|U.S. Bancorp|bank|g|2;PNC|PNC Financial|bank|g|2;TFC|Truist|bank|g|2;HSBC|HSBC (Reino Unido)|bank|g|2;SAN|Santander (Espanha)|bank|g|2;BBVA|BBVA (Espanha)|bank|g|2;
+COF|Capital One|pay|g|1;FI|Fiserv|pay|g|0;
+SPGI|S&P Global|inv|g|1;ICE|Intercontinental Exchange|inv|g|1;CME|CME Group|inv|g|2;KKR|KKR|inv|g|1;BX|Blackstone|inv|g|2;
+MET|MetLife|ins|g|2;PRU|Prudential|ins|g|2;AIG|AIG|ins|g|1;TRV|Travelers|ins|g|1;
+KDP|Keurig Dr Pepper|food|g|2;CAG|Conagra|food|g|2;CPB|Campbell's|food|g|2;TSN|Tyson Foods|food|g|2;STZ|Constellation Brands (cerveja, vinho)|food|g|1;DEO|Diageo (Reino Unido)|food|g|2;BUD|AB InBev (Bélgica)|food|g|1;
+DG|Dollar General|groc|g|1;DLTR|Dollar Tree|groc|g|0;
+CLX|Clorox|hh|g|2;CHD|Church & Dwight|hh|g|1;EL|Estée Lauder|hh|g|1;UL|Unilever (Reino Unido)|hh|g|2;BTI|British American Tobacco|tob|g|2;
+DPZ|Domino's Pizza|rest|g|1;DRI|Darden Restaurants|rest|g|2;QSR|Restaurant Brands (Burger King)|rest|g|2;
+RL|Ralph Lauren|app|g|1;TPR|Tapestry (Coach)|app|g|1;VFC|VF Corp (The North Face, Vans)|app|m|1;
+TM|Toyota (Japão)|auto|g|2;STLA|Stellantis (Fiat, Peugeot)|auto|g|2;RACE|Ferrari (Itália)|auto|g|1;HMC|Honda (Japão)|auto|g|2;
+TJX|TJX (TK Maxx)|shop|g|1;EBAY|eBay|shop|g|1;BBY|Best Buy|shop|g|2;MELI|MercadoLibre|shop|g|0;
+HLT|Hilton|trav|g|1;RCL|Royal Caribbean (cruzeiros)|trav|g|1;CCL|Carnival (cruzeiros)|trav|g|0;LUV|Southwest Airlines|trav|g|1;EXPE|Expedia|trav|g|1;
+GD|General Dynamics|def|g|1;LHX|L3Harris|def|g|1;
+ETN|Eaton|mach|g|1;EMR|Emerson|mach|g|1;ITW|Illinois Tool Works|mach|g|1;PH|Parker-Hannifin|mach|g|1;
+CSX|CSX (comboios)|log|g|1;NSC|Norfolk Southern (comboios)|log|g|1;
+CMCSA|Comcast|tel|g|2;CHTR|Charter|tel|g|0;
+SPOT|Spotify|media|g|0;EA|Electronic Arts (jogos)|media|g|1;TTWO|Take-Two (jogos)|media|g|0;
+VICI|VICI Properties (casinos)|reit|g|2;PSA|Public Storage|reit|g|2;WELL|Welltower (lares)|reit|g|1;DLR|Digital Realty (centros de dados)|reit|g|2;
+SCCO|Southern Copper|mine|g|2;NUE|Nucor (aço)|mine|g|1;AA|Alcoa (alumínio)|mine|m|1;RIO|Rio Tinto (Reino Unido)|mine|g|2;BHP|BHP (Austrália)|mine|g|2;VALE|Vale (Brasil)|mine|g|2;
+APD|Air Products|chem|g|2;ECL|Ecolab|chem|g|1;LYB|LyondellBasell|chem|g|2`
  .split(';').map(x=>{const [sym,name,cat,size,d]=x.trim().split('|');return{sym,name,cat,size,div:d!=='0',hy:d==='2',mcap:null,price:null,beta:null,yld:null}});
 
 const F={div:'',size:'',beta:'',cats:new Set()};
@@ -624,7 +669,7 @@ async function screenFMP(key){
   if(F.div==='sim'||F.div==='alto')base+='&dividendMoreThan=0';
   if(F.size){const [a,b]=SIZE[F.size];if(a)base+=`&marketCapMoreThan=${a}`;if(b)base+=`&marketCapLowerThan=${b}`}
   const all=await Promise.all(sectors.map(async sec=>{
-    const r=await fetch(`https://financialmodelingprep.com/stable/company-screener?${base}${sec?'&sector='+encodeURIComponent(sec):''}&apikey=${encodeURIComponent(key)}`);
+    const r=await fmp(`https://financialmodelingprep.com/stable/company-screener?${base}${sec?'&sector='+encodeURIComponent(sec):''}&apikey=${encodeURIComponent(key)}`);
     const j=await r.json().catch(()=>null);
     if(!r.ok||!Array.isArray(j))throw new Error((j&&j['Error Message'])||`HTTP ${r.status}`);
     return j;}));
@@ -636,23 +681,58 @@ async function screenFMP(key){
       size:x.marketCap>=10e9?'g':x.marketCap>=2e9?'m':'p'}});
 }
 const sizeLabel=z=>({g:'grande',m:'média',p:'pequena'}[z]||'');
+/* dados reais da lista incluída via /profile (gratuito), com cache de 24 h */
+const PROF_TTL=24*3600e3,MAX_CALLS=40;
+async function enrich(rows,key,onProg){
+  const cache=LS.get('a4c:prof',{}),now=Date.now();
+  const todo=rows.filter(r=>!(cache[r.sym]&&now-cache[r.sym].t<PROF_TTL));
+  const batch=todo.slice(0,MAX_CALLS);let done=0,failed=0,quota=false;
+  const worker=async()=>{while(batch.length){const r=batch.shift();
+    try{const res=await fmp(`https://financialmodelingprep.com/stable/profile?symbol=${encodeURIComponent(r.sym)}&apikey=${encodeURIComponent(key)}`);
+      if(res.status===429){quota=true;batch.length=0;break}
+      const j=await res.json().catch(()=>null);const x=Array.isArray(j)&&j[0];
+      if(x)cache[r.sym]={t:now,price:x.price,div:x.lastDividend??x.lastDiv??0,beta:x.beta,mcap:x.marketCap??x.mktCap,industry:x.industry};else failed++;
+    }catch(e){failed++}
+    onProg(++done,Math.min(todo.length,MAX_CALLS));}};
+  await Promise.all(Array.from({length:6},worker));
+  LS.set('a4c:prof',cache);
+  let live=0;
+  const out=rows.map(r=>{const c=cache[r.sym];if(!c)return r;live++;
+    const yld=c.price>0?(c.div||0)/c.price:null;
+    return{...r,price:c.price,beta:c.beta,mcap:c.mcap,industry:c.industry,div:(c.div||0)>0,yld,hy:yld!=null&&yld>=.03,live:true,
+      size:ok(c.mcap)?(c.mcap>=10e9?'g':c.mcap>=2e9?'m':'p'):r.size}});
+  return{rows:out,live,missing:rows.length-live,quota,failed};
+}
 async function discover(){
   const key=LS.get('a4c:key','');let rows=null,src='',full=false;
   $('#fGo').disabled=true;$('#fSrc').textContent='A procurar…';
-  if(key&&!inClaude){
+  const canNet=key&&!inClaude;
+  const noScr=LS.get('a4c:noScreener',0);
+  if(canNet&&Date.now()-noScr>7*24*3600e3){
     try{rows=await screenFMP(key);full=true;src='Lista completa da FMP (ações dos EUA).'}
-    catch(e){src=`A FMP não devolveu a lista (${e.message}); o teu plano pode não incluir este filtro. A mostrar a lista incluída. `}
+    catch(e){if(/402/.test(e.message)||/premium|subscription|plan/i.test(e.message))LS.set('a4c:noScreener',Date.now());}
   }
-  if(!rows){rows=LIST;src+=key&&!inClaude?'':(inClaude?'Lista incluída com cerca de 140 empresas conhecidas dos EUA (dentro do Claude não é possível pedir a lista completa). ':'Lista incluída com cerca de 140 empresas conhecidas dos EUA. Guarda a chave da API para pesquisares a lista completa. ')}
   const t=$('#fText').value.trim().toLowerCase(),maxP=parseFloat($('#fPrice').value);
-  const needFull=!full&&(F.beta||maxP>0);
-  if(needFull)src+='Os filtros de oscilação e preço só funcionam com a lista completa da FMP, por isso foram ignorados.';
-  if(!full&&(F.div==='alto'))src+=' Na lista incluída, "3%+" é aproximado e pode estar desatualizado.';
+  if(!rows){
+    // filtros que não precisam de dados ao vivo primeiro, para gastar menos pedidos
+    rows=LIST.filter(r=>(!F.cats.size||F.cats.has(r.cat))&&(!t||r.name.toLowerCase().includes(t)||r.sym.toLowerCase().includes(t)));
+    if(canNet){
+      const e=await enrich(rows,key,(d,n)=>{$('#fSrc').textContent=`A obter dividendos e preços reais… ${d} de ${n}`});
+      rows=e.rows;
+      src=`Lista incluída (${LIST.length} empresas dos EUA) com dividendos, preços e tamanho reais da FMP, atualizados uma vez por dia.`;
+      if(e.missing>0)src+=` ${e.missing} ${e.missing===1?'empresa ficou':'empresas ficaram'} com dados aproximados${e.quota?' (limite diário da FMP atingido)':''}; ${e.quota?'tenta amanhã.':'carrega outra vez em "Mostrar ações" para completar, ou escolhe menos tipos de negócio.'}`;
+    }else src=inClaude?`Lista incluída com ${LIST.length} empresas conhecidas dos EUA. Dentro do Claude os dividendos são aproximados; no GitHub passam a ser reais.`
+      :`Lista incluída com ${LIST.length} empresas conhecidas dos EUA. Guarda a chave da API para teres dividendos e preços reais.`;
+  }
+  const liveOK=r=>full||r.live;
+  const anyLive=full||rows.some(r=>r.live);
+  if(!anyLive&&(F.beta||maxP>0))src+=' Os filtros de oscilação e preço precisam de dados reais, por isso foram ignorados.';
+  if(!anyLive&&F.div==='alto')src+=' O "3%+" está a usar valores aproximados.';
   rows=rows.filter(r=>(!F.cats.size||F.cats.has(r.cat))
     &&(!F.div||(F.div==='sim'&&r.div)||(F.div==='alto'&&r.hy)||(F.div==='nao'&&!r.div))
     &&(!F.size||r.size===F.size)
-    &&(!full||!F.beta||(ok(r.beta)&&(F.beta==='calma'?r.beta<.8:F.beta==='normal'?r.beta>=.8&&r.beta<=1.3:r.beta>1.3)))
-    &&(!full||!(maxP>0)||(ok(r.price)&&r.price<=maxP))
+    &&(!F.beta||!liveOK(r)||(ok(r.beta)&&(F.beta==='calma'?r.beta<.8:F.beta==='normal'?r.beta>=.8&&r.beta<=1.3:r.beta>1.3)))
+    &&(!(maxP>0)||!liveOK(r)||(ok(r.price)&&r.price<=maxP))
     &&(!t||r.name.toLowerCase().includes(t)||r.sym.toLowerCase().includes(t)));
   const so=$('#fSort').value;
   rows.sort(so==='name'?(a,b)=>a.name.localeCompare(b.name,'pt')
@@ -661,7 +741,7 @@ async function discover(){
     :(a,b)=>(b.mcap||0)-(a.mcap||0));
   $('#fSrc').textContent=src.trim();
   $('#fCount').textContent=rows.length?`${rows.length} ${rows.length===1?'ação encontrada':'ações encontradas'}${rows.length>150?' (a mostrar as primeiras 150)':''}`:'';
-  const tagDiv=r=>r.div?`<span class="tag d">${r.yld!=null?'dividendo '+pct(r.yld):r.hy?'dividendo 3%+':'dividendos'}</span>`:'<span class="tag n">sem dividendos</span>';
+  const tagDiv=r=>r.div?`<span class="tag d">${r.yld!=null?'dividendo '+pct(r.yld):r.hy?'dividendo ~3%+':'dividendos'}</span>`:'<span class="tag n">sem dividendos</span>';
   $('#fRes').innerHTML=rows.length?rows.slice(0,150).map(r=>`<li><button data-s="${esc(r.sym)}"><span class="nm">${esc(r.name)}${tagDiv(r)}</span>
     <span class="sub">${esc(r.sym)} · ${esc(r.cat?CAT[r.cat][1]:(r.industry||'outro'))}${r.size?' · '+sizeLabel(r.size):''}${ok(r.price)?' · '+num(r.price,2)+' $':''}</span><span class="go">Analisar</span></button></li>`).join('')
     :'<li style="color:var(--muted)">Nenhuma ação com estes filtros. Experimenta escolher mais tipos de negócio ou alargar os dividendos e o tamanho.</li>';
@@ -674,7 +754,7 @@ $('#fRes').onclick=e=>{const b=e.target.closest('button[data-s]');if(!b)return;s
 function showTab(t){$('#viewA').hidden=t!=='A';$('#viewD').hidden=t!=='D';$('#tabA').setAttribute('aria-selected',t==='A');$('#tabD').setAttribute('aria-selected',t==='D');window.scrollTo({top:0})}
 $('#tabA').onclick=()=>showTab('A');$('#tabD').onclick=()=>showTab('D');
 $('#key').value=LS.get('a4c:key','');
-keyState();drawArchive();
+keyState();drawArchive();showUsage();
 </script>
 </body>
 </html>
